@@ -104,94 +104,29 @@ def fetch_stock_data_yahoo(symbol):
                         'price': current_price,
                         'prev_close': prev_close,
                         'change': current_price - prev_close,
-                        'change_pct': ((current_price - prev_close) / prev_close) * 100
-                    }
-    except Exception as e:
-        st.warning(f"Yahoo Finance error for {symbol}: {str(e)}")
-    
-    return None
-
-@st.cache_data(ttl=30)
-def fetch_stock_data_alphavantage(symbol):
-    try:
-        api_key = "demo"
-        clean_symbol = symbol.replace('.NS', '').replace('.BO', '')
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={clean_symbol}&apikey={api_key}"
-        
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            
-            if 'Global Quote' in data and data['Global Quote']:
-                quote = data['Global Quote']
-                current_price = float(quote.get('05. price', 0))
-                prev_close = float(quote.get('08. previous close', current_price))
-                
-                if current_price > 0:
-                    return {
-                        'price': current_price,
-                        'prev_close': prev_close,
-                        'change': current_price - prev_close,
-                        'change_pct': ((current_price - prev_close) / prev_close) * 100
+                        'change_pct': ((current_price - prev_close) / prev_close) * 100,
+                        'symbol': symbol
                     }
     except Exception as e:
         pass
     
     return None
 
-@st.cache_data(ttl=30)
-def fetch_stock_data(symbol):
-    stock_data = fetch_stock_data_yahoo(symbol)
+def generate_option_chain(symbol, spot_price, risk_free_rate, implied_vol, num_strikes, strike_interval, num_expiries, expiry_start_days):
+    strikes = []
+    base_strike = int(spot_price)
     
-    if stock_data is None:
-        stock_data = fetch_stock_data_alphavantage(symbol)
+    for i in range(-num_strikes // 2, num_strikes // 2 + 1):
+        strike = base_strike + (i * strike_interval)
+        if strike > 0:
+            strikes.append(strike)
     
-    if stock_data is None:
-        mock_prices = {
-            'RELIANCE.NS': 2850.50,
-            'TCS.NS': 3650.75,
-            'INFY.NS': 1450.30,
-            'HDFCBANK.NS': 1650.80,
-            'ICICIBANK.NS': 1050.25,
-            'AAPL': 195.50,
-            'MSFT': 380.75,
-            'GOOGL': 140.25,
-            'AMZN': 175.50,
-            'TSLA': 245.80,
-            'NVDA': 495.30,
-            'META': 355.20,
-            'NFLX': 485.60,
-            'AMD': 145.90,
-            'INTC': 45.75
-        }
-        
-        if symbol in mock_prices:
-            price = mock_prices[symbol]
-            return {
-                'price': price,
-                'prev_close': price * 0.99,
-                'change': price * 0.01,
-                'change_pct': 1.0
-            }
-    
-    return stock_data
-
-def generate_option_chain(symbol, spot_price, risk_free_rate=0.065, implied_vol=0.30):
-    strikes = [
-        int(spot_price * 0.85),
-        int(spot_price * 0.90),
-        int(spot_price * 0.95),
-        int(spot_price),
-        int(spot_price * 1.05),
-        int(spot_price * 1.10),
-        int(spot_price * 1.15)
-    ]
-    
-    expiries = [
-        (datetime.now() + timedelta(days=16), "30 Dec 25"),
-        (datetime.now() + timedelta(days=47), "30 Jan 26"),
-        (datetime.now() + timedelta(days=103), "27 Mar 26")
-    ]
+    expiries = []
+    for i in range(num_expiries):
+        days_ahead = expiry_start_days + (i * 30)
+        exp_date = datetime.now() + timedelta(days=days_ahead)
+        exp_label = exp_date.strftime("%d %b %y")
+        expiries.append((exp_date, exp_label))
     
     options_data = []
     
@@ -210,7 +145,7 @@ def generate_option_chain(symbol, spot_price, risk_free_rate=0.065, implied_vol=
                 time_value = theo_price - intrinsic
                 greeks = calculate_greeks(spot_price, strike, T, risk_free_rate, implied_vol, opt_type)
                 
-                option_code = f"{symbol.replace('.NS', '').replace('.BO', '')} {exp_label} {strike} {'CE' if opt_type == 'call' else 'PE'}"
+                option_code = f"{symbol.replace('.NS', '').replace('.BO', '').replace('.L', '')} {exp_label} {strike} {'CE' if opt_type == 'call' else 'PE'}"
                 
                 options_data.append({
                     'Option Code': option_code,
@@ -233,72 +168,110 @@ def generate_option_chain(symbol, spot_price, risk_free_rate=0.065, implied_vol=
     
     return pd.DataFrame(options_data)
 
-st.title("📈 Live Options Pricing Model")
-st.markdown("Real-time options data with Black-Scholes pricing and Greeks")
+st.title("📈 Live Options Pricing Model - Global Markets")
+st.markdown("Real-time options pricing for any stock worldwide with Black-Scholes model")
 
-st.sidebar.header("⚙️ Configuration")
+col1, col2 = st.columns([2, 1])
 
-market = st.sidebar.selectbox(
-    "Select Market",
-    ["NSE (India)", "NYSE (US)", "NASDAQ (US)"]
-)
+with col1:
+    st.subheader("🔍 Enter Stock Symbols")
+    
+    symbols_input = st.text_area(
+        "Enter stock symbols (one per line). Add market suffix for international stocks:",
+        placeholder="Examples:\nRELIANCE.NS (NSE India)\nAAPL (US)\nTSLA (US)\n^NSEI (Nifty 50)\nVODAFONE.L (London)",
+        height=150,
+        help="NSE India: .NS | BSE India: .BO | London: .L | US stocks: no suffix"
+    )
+    
+    symbols_list = [s.strip().upper() for s in symbols_input.split('\n') if s.strip()]
 
-market_stocks = {
-    "NSE (India)": ['RELIANCE.NS', 'TCS.NS', 'INFY.NS', 'HDFCBANK.NS', 'ICICIBANK.NS'],
-    "NYSE (US)": ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'],
-    "NASDAQ (US)": ['NVDA', 'META', 'NFLX', 'AMD', 'INTC']
-}
-
-selected_stocks = market_stocks[market]
-
-st.sidebar.subheader("Model Parameters")
-risk_free_rate = st.sidebar.slider("Risk-Free Rate (%)", 0.0, 15.0, 6.5, 0.1) / 100
-implied_vol = st.sidebar.slider("Implied Volatility (%)", 10.0, 100.0, 30.0, 1.0) / 100
-
-auto_refresh = st.sidebar.checkbox("Auto-refresh (30s)", value=False)
-
-st.subheader("🔍 Search Options")
-search_query = st.text_input(
-    "Search by option code (e.g., RELIANCE 30 Dec 25 1550 CE) or underlying symbol",
-    placeholder="Enter search term..."
-)
+with col2:
+    st.subheader("⚙️ Model Parameters")
+    
+    risk_free_rate = st.slider("Risk-Free Rate (%)", 0.0, 15.0, 6.5, 0.1) / 100
+    implied_vol = st.slider("Implied Volatility (%)", 10.0, 100.0, 30.0, 1.0) / 100
+    
+    st.subheader("📊 Option Chain Settings")
+    
+    num_strikes = st.slider("Number of Strike Prices", 5, 21, 11, 2, help="Total strike prices to generate")
+    strike_interval = st.number_input("Strike Interval", min_value=1, max_value=1000, value=50, help="Price gap between strikes")
+    num_expiries = st.slider("Number of Expiries", 1, 12, 3, help="Number of expiration dates")
+    expiry_start_days = st.slider("First Expiry (days ahead)", 1, 90, 15, help="Days until first expiration")
 
 col1, col2, col3 = st.columns([1, 1, 4])
 with col1:
-    refresh_button = st.button("🔄 Refresh Data", use_container_width=True)
+    generate_button = st.button("🚀 Generate Options Chain", use_container_width=True, type="primary")
 with col2:
-    st.write(f"Last update: {datetime.now().strftime('%H:%M:%S')}")
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
-st.subheader("📊 Options Chain")
+if 'options_data' not in st.session_state:
+    st.session_state.options_data = None
 
-all_options = []
-
-with st.spinner("Fetching live data..."):
-    for symbol in selected_stocks:
-        stock_data = fetch_stock_data(symbol)
+if generate_button and symbols_list:
+    all_options = []
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for idx, symbol in enumerate(symbols_list):
+        status_text.text(f"Fetching data for {symbol}...")
+        
+        stock_data = fetch_stock_data_yahoo(symbol)
         
         if stock_data:
+            st.success(f"✓ {symbol}: ₹{stock_data['price']:.2f} ({stock_data['change_pct']:+.2f}%)")
+            
             options_df = generate_option_chain(
                 symbol, 
                 stock_data['price'],
                 risk_free_rate,
-                implied_vol
+                implied_vol,
+                num_strikes,
+                strike_interval,
+                num_expiries,
+                expiry_start_days
             )
             all_options.append(options_df)
+        else:
+            st.warning(f"✗ Could not fetch data for {symbol}")
+        
+        progress_bar.progress((idx + 1) / len(symbols_list))
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    if all_options:
+        st.session_state.options_data = pd.concat(all_options, ignore_index=True)
+        st.success(f"✓ Generated {len(st.session_state.options_data)} options!")
+    else:
+        st.error("No data could be fetched. Please check your symbols and try again.")
 
-if all_options:
-    combined_df = pd.concat(all_options, ignore_index=True)
+elif generate_button and not symbols_list:
+    st.warning("⚠️ Please enter at least one stock symbol")
+
+if st.session_state.options_data is not None and not st.session_state.options_data.empty:
+    st.markdown("---")
+    st.subheader("📊 Options Chain Data")
+    
+    search_query = st.text_input(
+        "🔍 Search options (by code, underlying, strike, or type)",
+        placeholder="e.g., RELIANCE 30 Dec 25 1550 CE"
+    )
+    
+    filtered_df = st.session_state.options_data.copy()
     
     if search_query:
         mask = (
-            combined_df['Option Code'].str.contains(search_query, case=False, na=False) |
-            combined_df['Underlying'].str.contains(search_query, case=False, na=False)
+            filtered_df['Option Code'].str.contains(search_query, case=False, na=False) |
+            filtered_df['Underlying'].str.contains(search_query, case=False, na=False) |
+            filtered_df['Type'].str.contains(search_query, case=False, na=False) |
+            filtered_df['Strike'].astype(str).str.contains(search_query, na=False)
         )
-        filtered_df = combined_df[mask]
-    else:
-        filtered_df = combined_df
+        filtered_df = filtered_df[mask]
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Total Options", len(filtered_df))
     with col2:
@@ -307,14 +280,18 @@ if all_options:
         st.metric("Put Options", len(filtered_df[filtered_df['Type'] == 'PUT']))
     with col4:
         st.metric("ITM Options", len(filtered_df[filtered_df['ITM']]))
+    with col5:
+        st.metric("Unique Stocks", filtered_df['Underlying'].nunique())
     
     display_df = filtered_df.copy()
     
-    display_df['Spot Price'] = display_df['Spot Price'].map('₹{:.2f}'.format)
-    display_df['Strike'] = display_df['Strike'].map('₹{:.0f}'.format)
-    display_df['Theoretical Price'] = display_df['Theoretical Price'].map('₹{:.2f}'.format)
-    display_df['Intrinsic Value'] = display_df['Intrinsic Value'].map('₹{:.2f}'.format)
-    display_df['Time Value'] = display_df['Time Value'].map('₹{:.2f}'.format)
+    currency_symbol = '₹' if any('.NS' in s or '.BO' in s for s in symbols_list) else '$'
+    
+    display_df['Spot Price'] = display_df['Spot Price'].map(f'{currency_symbol}{{:.2f}}'.format)
+    display_df['Strike'] = display_df['Strike'].map(f'{currency_symbol}{{:.0f}}'.format)
+    display_df['Theoretical Price'] = display_df['Theoretical Price'].map(f'{currency_symbol}{{:.2f}}'.format)
+    display_df['Intrinsic Value'] = display_df['Intrinsic Value'].map(f'{currency_symbol}{{:.2f}}'.format)
+    display_df['Time Value'] = display_df['Time Value'].map(f'{currency_symbol}{{:.2f}}'.format)
     display_df['Delta'] = display_df['Delta'].map('{:.4f}'.format)
     display_df['Gamma'] = display_df['Gamma'].map('{:.4f}'.format)
     display_df['Theta'] = display_df['Theta'].map('{:.4f}'.format)
@@ -336,26 +313,70 @@ if all_options:
         file_name=f"options_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
-    
+
 else:
-    st.error("Unable to fetch data. Please check your internet connection and try again.")
+    st.info("👆 Enter stock symbols above and click 'Generate Options Chain' to get started!")
+    
+    st.markdown("### 📚 Example Symbols by Market:")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        **🇮🇳 India (NSE)**
+        - RELIANCE.NS
+        - TCS.NS
+        - INFY.NS
+        - HDFCBANK.NS
+        - ICICIBANK.NS
+        - ^NSEI (Nifty 50)
+        """)
+    
+    with col2:
+        st.markdown("""
+        **🇺🇸 United States**
+        - AAPL (Apple)
+        - MSFT (Microsoft)
+        - GOOGL (Google)
+        - TSLA (Tesla)
+        - NVDA (Nvidia)
+        - ^GSPC (S&P 500)
+        """)
+    
+    with col3:
+        st.markdown("""
+        **🌍 Other Markets**
+        - VODAFONE.L (London)
+        - BMW.DE (Germany)
+        - 7203.T (Toyota - Tokyo)
+        - 0700.HK (Tencent - HK)
+        - SAP (NYSE ADR)
+        """)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📖 Understanding Greeks")
 st.sidebar.markdown("""
-- **Delta**: Rate of change of option price vs underlying
-- **Gamma**: Rate of change of delta
-- **Theta**: Time decay per day
-- **Vega**: Sensitivity to volatility (per 1%)
-- **Rho**: Sensitivity to interest rate (per 1%)
+- **Delta**: Rate of change of option price vs underlying (0 to 1 for calls, -1 to 0 for puts)
+- **Gamma**: Rate of change of delta (convexity)
+- **Theta**: Time decay per day (negative for long options)
+- **Vega**: Sensitivity to volatility per 1% change
+- **Rho**: Sensitivity to interest rate per 1% change
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("💡 Tips")
+st.sidebar.markdown("""
+- Use market suffixes: .NS (India NSE), .BO (India BSE), .L (London)
+- US stocks don't need suffix
+- Adjust strike interval based on stock price
+- Higher volatility = higher option prices
+- ITM options have intrinsic value
 """)
 
 st.sidebar.markdown("---")
 st.sidebar.info("""
-**Note**: Theoretical prices are calculated using the Black-Scholes model. 
-Actual market prices may differ due to factors like liquidity, supply/demand, and market conditions.
-""")
+**Note**: Theoretical prices use Black-Scholes model. 
+Actual market prices may differ.
 
-if auto_refresh:
-    time.sleep(30)
-    st.rerun()
+Data from Yahoo Finance.
+""")
